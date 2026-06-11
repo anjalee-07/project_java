@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CodeNuance — live shared editor</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+    <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div class="grain" aria-hidden="true"></div>
+
+<!-- ===================== LOBBY ===================== -->
+<main id="lobby" class="lobby">
+    <span class="shape shape-blue shape-1" aria-hidden="true"></span>
+    <span class="shape shape-burgundy shape-2" aria-hidden="true"></span>
+    <span class="shape shape-blue shape-3" aria-hidden="true"></span>
+
+    <div class="lobby-inner">
+        <section class="hero-panel">
+            <span class="badge"><i class="badge-dot"></i> Real-time · Operational Transformation</span>
+
+            <h1 class="display">
+                Code together,
+                <span class="accent">in real time.</span>
+            </h1>
+
+            <p class="tagline">
+                Open a room, share the link, and start building. Every keystroke,
+                cursor, and edit syncs instantly across everyone in the room —
+                no merge conflicts, ever.
+            </p>
+
+            <!-- Live "two people typing" demo — shows the product, not a stock graphic. -->
+            <div class="demo-window" aria-hidden="true">
+                <div class="demo-titlebar">
+                    <span class="demo-dot"></span>
+                    <span class="demo-dot"></span>
+                    <span class="demo-dot"></span>
+                    <span class="demo-filename">sync.js</span>
+                </div>
+                <pre class="demo-code" id="demo-code"></pre>
+            </div>
+
+            <ul class="feature-list">
+                <li>Live multi-cursor editing with named presence</li>
+                <li>14 languages, synced for the whole room</li>
+                <li>Nothing to install — just share a link</li>
+            </ul>
+
+            <div class="live-stat" id="live-stat">
+                <span class="live-dot"></span>
+                <span id="live-stat-text">Checking for live rooms…</span>
+            </div>
+        </section>
+
+        <aside class="join-card">
+            <form id="join-form" class="join-form" autocomplete="off">
+                <div class="field">
+                    <label for="name-input">Your name</label>
+                    <input id="name-input" type="text" placeholder="e.g. Pratibha" maxlength="24" required>
+                </div>
+                <div class="field">
+                    <label for="room-input">Room</label>
+                    <input id="room-input" type="text" placeholder="sunset-loft" maxlength="40" required>
+                </div>
+                <div class="field">
+                    <label for="lang-select">Language <span class="hint">starter for new rooms</span></label>
+                    <select id="lang-select" class="select"></select>
+                </div>
+                <button type="submit" class="btn-primary">
+                    <span>Enter the room</span>
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M3.5 8H12.5M12.5 8L8.5 4M12.5 8L8.5 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </button>
+            </form>
+
+            <div class="rooms">
+                <p class="rooms-title">Live rooms</p>
+                <ul id="rooms-list" class="rooms-list">
+                    <li class="rooms-empty">No live rooms yet — start one above.</li>
+                </ul>
+            </div>
+        </aside>
+    </div>
+</main>
+
+<!-- ===================== EDITOR ===================== -->
+<main id="workspace" class="workspace hidden">
+    <header class="topbar">
+        <div class="brand">
+            <span class="dot"></span>
+            <span class="brand-name">CodeNuance</span>
+            <span class="room-pill" id="room-pill">room</span>
+        </div>
+        <div class="presence" id="presence" title="People in this room"></div>
+        <div class="topbar-actions">
+            <select id="lang-switcher" class="select select-compact" title="Language (synced for everyone)"></select>
+            <button id="run-btn" class="btn-run" title="Run the code (Judge0)">
+                <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true">
+                    <path d="M3 2.2v8.6L11 6.5 3 2.2Z" fill="currentColor"/>
+                </svg>
+                <span>Run</span>
+            </button>
+            <span class="conn" id="conn-status" data-state="connecting">connecting…</span>
+            <button id="share-btn" class="btn-ghost">Copy invite link</button>
+            <button id="leave-btn" class="btn-ghost">Leave</button>
+        </div>
+    </header>
+
+    <section class="editor-shell">
+        <div class="editor-pane">
+            <div class="gutter-glow"></div>
+            <div id="editor"></div>
+        </div>
+
+        <div class="console-panel hidden" id="console-panel">
+            <div class="console-head">
+                <span class="console-title">Output</span>
+                <span class="console-status" id="console-status"></span>
+                <span class="console-meta" id="console-meta"></span>
+                <button class="console-close" id="console-close" title="Hide console">✕</button>
+            </div>
+            <pre class="console-body" id="console-body"></pre>
+        </div>
+    </section>
+
+    <footer class="statusbar">
+        <span id="status-rev">rev 0</span>
+        <span class="sep">·</span>
+        <span id="status-sync">synced</span>
+        <span class="sep">·</span>
+        <span id="status-peers">1 here</span>
+        <span class="spacer"></span>
+        <span class="muted" id="status-lang">JavaScript</span>
+    </footer>
+</main>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs/loader.min.js"></script>
+<script>
+    // Configure the Monaco AMD loader. Workers are loaded cross-origin from the
+    // CDN via a tiny same-origin blob shim so the editor's web workers boot.
+    window.MONACO_VS = "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs";
+    require.config({ paths: { vs: window.MONACO_VS } });
+    window.MonacoEnvironment = {
+        getWorkerUrl: function () {
+            var blob = "self.MonacoEnvironment={baseUrl:'" + window.MONACO_VS + "/'};" +
+                "importScripts('" + window.MONACO_VS + "/base/worker/workerMain.js');";
+            return "data:text/javascript;charset=utf-8," + encodeURIComponent(blob);
+        }
+    };
+</script>
+<script src="js/ot.js"></script>
+<script src="js/demo.js"></script>
+<script src="js/editor.js"></script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(java -version)",
+      "Bash(mvn -version)",
+      "PowerShell($mvn = \\(Get-Command mvn -ErrorAction SilentlyContinue\\); $gradle = \\(Get-Command gradle -ErrorAction SilentlyContinue\\); \"mvn: $\\($mvn.Source\\)\"; \"gradle: $\\($gradle.Source\\)\"; \"JAVA_HOME: $env:JAVA_HOME\")",
+      "PowerShell(try { $r = Invoke-WebRequest -Uri \"https://repo.maven.apache.org/maven2/org/apache/maven/wrapper/maven-wrapper/3.3.2/maven-wrapper-3.3.2.jar\" -Method Head -TimeoutSec 20 -ErrorAction Stop; \"OK status=$\\($r.StatusCode\\)\" } catch { \"FAIL: $\\($_.Exception.Message\\)\" })",
+      "Bash(JAVA_HOME=\"/c/Program Files/Java/jdk-17\" \"/c/Program Files/Java/jdk-17/bin/java.exe\" -jar target/codenuance-1.0.0.jar)",
+      "Bash(echo \"started pid $!\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8080/)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8080/css/app.css)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8080/js/ot.js)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8080/js/editor.js)",
+      "Bash(curl -s http://localhost:8080/api/rooms)",
+      "Read(//c/Program Files/Google/Chrome/Application//**)",
+      "Read(//c/Program Files \\(x86\\)/Microsoft/Edge/Application//**)",
+      "Bash(curl -s -X POST http://localhost:8080/api/run -H \"Content-Type: application/json\" -d '{\"language\":\"javascript\",\"source\":\"console.log\\(2+3\\)\",\"stdin\":\"\"}')"
+    ]
+  }
+}
