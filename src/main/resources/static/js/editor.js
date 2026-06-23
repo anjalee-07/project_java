@@ -359,8 +359,7 @@
             "&clientKey=" + encodeURIComponent(clientKey) +
             "&since=" + since;
         ws = new WebSocket(url);
-        setConn(reconnectAttempts > 0 ? "connecting" : "connecting",
-            reconnectAttempts > 0 ? "reconnecting…" : "connecting…");
+        setConn("connecting", reconnectAttempts > 0 ? "reconnecting…" : "connecting…");
 
         ws.onopen = function () {
             reconnectAttempts = 0;
