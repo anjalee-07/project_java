@@ -1,10 +1,12 @@
 package com.codenuance.ws;
 
+import com.codenuance.messaging.MessageBus;
 import com.codenuance.ot.TextOperation;
 import com.codenuance.session.Languages;
 import com.codenuance.session.Peer;
 import com.codenuance.session.Room;
 import com.codenuance.session.RoomManager;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -50,14 +52,18 @@ public class CollabWebSocketHandler extends TextWebSocketHandler {
     private static final String ATTR_CLIENT = "clientId";
 
     private final RoomManager rooms;
+    private final MessageBus bus;
     private final ObjectMapper json = new ObjectMapper();
     private final AtomicLong clientSeq = new AtomicLong();
 
     /** sessionId -> live socket, so a {@link Peer} can be resolved back to its connection. */
     private final Map<String, WebSocketSession> sessions = new ConcurrentHashMap<>();
 
-    public CollabWebSocketHandler(RoomManager rooms) {
+    public CollabWebSocketHandler(RoomManager rooms, MessageBus bus) {
         this.rooms = rooms;
+        this.bus = bus;
+        // Deliver messages that arrive from other server instances to our local sockets.
+        this.bus.onRemoteMessage(this::relayFromRemote);
     }
 
     @Override
@@ -65,33 +71,62 @@ public class CollabWebSocketHandler extends TextWebSocketHandler {
         sessions.put(session.getId(), session);
 
         String roomId = roomIdFromPath(session);
-        String clientId = "c" + clientSeq.incrementAndGet();
+        // A stable per-browser key keeps identity (and the colored cursor) across
+        // reconnects; fall back to a fresh id for first-time/legacy clients.
+        String clientKey = queryParam(session, "clientKey");
+        String clientId = (clientKey != null && !clientKey.isBlank())
+                ? clientKey.trim() : "c" + clientSeq.incrementAndGet();
         String name = displayNameFromQuery(session, clientId);
         String color = rooms.nextColor();
         String requestedLang = queryParam(session, "lang");
+        int since = parseInt(queryParam(session, "since"), -1);
 
         Room room = rooms.getOrCreate(roomId, requestedLang);
-        room.addPeer(new Peer(clientId, session.getId(), name, color));
+        Room.JoinState join = room.join(new Peer(clientId, session.getId(), name, color), since);
 
         session.getAttributes().put(ATTR_ROOM, roomId);
         session.getAttributes().put(ATTR_CLIENT, clientId);
 
-        // Send the newcomer the current document state + everyone present.
-        ObjectNode init = json.createObjectNode();
-        init.put("type", "init");
-        init.put("clientId", clientId);
-        init.put("name", name);
-        init.put("color", color);
-        init.put("revision", room.getRevision());
-        init.put("document", room.getContents());
-        init.put("language", room.getLanguage());
-        init.put("roomName", room.getName());
-        init.set("peers", peersJson(room));
-        send(session, init);
+        if (join.isResume()) {
+            // Reconnect: replay only the operations the client missed.
+            ObjectNode replay = json.createObjectNode();
+            replay.put("type", "replay");
+            replay.put("clientId", clientId);
+            replay.put("color", color);
+            replay.put("revision", join.revision());
+            replay.put("language", join.language());
+            ArrayNode opsArr = json.createArrayNode();
+            for (Room.OpMeta meta : join.replay()) {
+                ObjectNode entry = json.createObjectNode();
+                entry.put("clientId", meta.authorId());
+                entry.put("opId", meta.opId());
+                entry.put("revision", meta.revision());
+                entry.set("operation", operationToJson(meta.operation()));
+                opsArr.add(entry);
+            }
+            replay.set("ops", opsArr);
+            replay.set("peers", peersJson(room));
+            send(session, replay);
+            log.info("peer {} resumed room {} (replayed {} op(s) since rev {})",
+                    clientId, roomId, join.replay().size(), since);
+        } else {
+            // First join (or history too old to replay): send the full document.
+            ObjectNode init = json.createObjectNode();
+            init.put("type", "init");
+            init.put("clientId", clientId);
+            init.put("name", name);
+            init.put("color", color);
+            init.put("revision", join.revision());
+            init.put("document", join.contents());
+            init.put("language", join.language());
+            init.put("roomName", join.name());
+            init.set("peers", peersJson(room));
+            send(session, init);
+            log.info("peer {} joined room {} ({} present)", clientId, roomId, room.getPeerCount());
+        }
 
         // Tell everyone the roster changed.
         broadcastPeers(room);
-        log.info("peer {} joined room {} ({} present)", clientId, roomId, room.getPeerCount());
     }
 
     @Override
@@ -114,11 +149,12 @@ public class CollabWebSocketHandler extends TextWebSocketHandler {
 
     private void handleOperation(WebSocketSession session, Room room, String clientId, JsonNode msg) {
         int revision = msg.path("revision").asInt();
+        long opId = msg.path("opId").asLong(-1);
         TextOperation incoming = parseOperation(msg.path("operation"));
 
         Room.ApplyResult result;
         try {
-            result = room.applyOperation(revision, incoming);
+            result = room.applyOperation(clientId, opId, revision, incoming);
         } catch (RuntimeException ex) {
             // The client based its edit on an impossible revision — ask it to resync.
             log.warn("rejecting op from {} in room {}: {}", clientId, room.getId(), ex.getMessage());
@@ -135,6 +171,11 @@ public class CollabWebSocketHandler extends TextWebSocketHandler {
         ack.put("type", "ack");
         send(session, ack);
 
+        // A duplicate (resent after reconnect) was already applied and broadcast.
+        if (result.duplicate()) {
+            return;
+        }
+
         // ...and broadcast the transformed operation to everyone else.
         ObjectNode out = json.createObjectNode();
         out.put("type", "op");
@@ -142,6 +183,7 @@ public class CollabWebSocketHandler extends TextWebSocketHandler {
         out.put("revision", result.revision());
         out.set("operation", operationToJson(result.operation()));
         broadcastExcept(room, session.getId(), out);
+        publishRemote(room.getId(), out);
     }
 
     private void handleSelection(WebSocketSession session, Room room, String clientId, JsonNode msg) {
@@ -157,6 +199,7 @@ public class CollabWebSocketHandler extends TextWebSocketHandler {
         out.put("anchor", anchor);
         out.put("head", head);
         broadcastExcept(room, session.getId(), out);
+        publishRemote(room.getId(), out);
     }
 
     private void handleLanguage(Room room, String clientId, JsonNode msg) {
@@ -172,6 +215,7 @@ public class CollabWebSocketHandler extends TextWebSocketHandler {
         out.put("clientId", clientId);
         out.put("language", room.getLanguage());
         broadcastAll(room, out);
+        publishRemote(room.getId(), out);
     }
 
     @Override
@@ -192,6 +236,7 @@ public class CollabWebSocketHandler extends TextWebSocketHandler {
         left.put("type", "peer-left");
         left.put("clientId", clientId);
         broadcastExcept(room, session.getId(), left);
+        publishRemote(roomId, left);
         broadcastPeers(room);
 
         rooms.removeIfEmpty(roomId);
@@ -255,6 +300,36 @@ public class CollabWebSocketHandler extends TextWebSocketHandler {
         for (WebSocketSession s : sessionsOf(room)) {
             send(s, out);
         }
+        publishRemote(room.getId(), out);
+    }
+
+    // ----- Cross-instance fan-out (Redis Pub/Sub) ------------------------
+
+    /** Publish an already-built broadcast to other server instances via the bus. */
+    private void publishRemote(String roomId, ObjectNode payload) {
+        try {
+            bus.publish(roomId, json.writeValueAsString(payload));
+        } catch (JsonProcessingException e) {
+            log.warn("failed to publish room {} message: {}", roomId, e.getMessage());
+        }
+    }
+
+    /** Deliver a message originating on another instance to our local sockets. */
+    private void relayFromRemote(String roomId, String messageJson) {
+        Room room = rooms.get(roomId);
+        if (room == null) {
+            return; // no local peers for this room on this instance
+        }
+        TextMessage frame = new TextMessage(messageJson);
+        for (WebSocketSession s : sessionsOf(room)) {
+            try {
+                if (s.isOpen()) {
+                    s.sendMessage(frame);
+                }
+            } catch (IOException e) {
+                log.warn("failed to relay to session {}: {}", s.getId(), e.getMessage());
+            }
+        }
     }
 
     private void broadcastExcept(Room room, String exceptSessionId, ObjectNode payload) {
@@ -299,6 +374,17 @@ public class CollabWebSocketHandler extends TextWebSocketHandler {
         int idx = path.lastIndexOf('/');
         String id = idx >= 0 && idx < path.length() - 1 ? path.substring(idx + 1) : "lobby";
         return id.isBlank() ? "lobby" : id;
+    }
+
+    private static int parseInt(String value, int fallback) {
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
     }
 
     private static String displayNameFromQuery(WebSocketSession session, String fallback) {

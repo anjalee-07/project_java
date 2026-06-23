@@ -20,17 +20,47 @@ public class ServerDocument {
     private String contents;
     private final List<TextOperation> history = new ArrayList<>();
 
+    /**
+     * Revision number of {@link #contents} before any operation in {@link #history}
+     * was applied. Normally 0, but a document recovered from a persisted snapshot
+     * starts at the snapshot's revision so revision numbers stay monotonic across
+     * restarts (older history is not kept; clients behind it get a full resync).
+     */
+    private final int baseRevision;
+
     public ServerDocument(String initialContents) {
+        this(initialContents, 0);
+    }
+
+    public ServerDocument(String initialContents, int baseRevision) {
         this.contents = initialContents == null ? "" : initialContents;
+        this.baseRevision = Math.max(0, baseRevision);
     }
 
     public String getContents() {
         return contents;
     }
 
-    /** The current revision equals the number of operations applied so far. */
+    /** The current revision: the base revision plus every operation applied since. */
     public int getRevision() {
-        return history.size();
+        return baseRevision + history.size();
+    }
+
+    /** The earliest revision still reachable via {@link #operationsSince(int)}. */
+    public int getBaseRevision() {
+        return baseRevision;
+    }
+
+    /**
+     * Returns the operations applied since {@code revision}, in order, for replaying
+     * to a reconnecting client. Returns {@code null} when {@code revision} predates
+     * the retained history (the caller should send a full resync instead).
+     */
+    public List<TextOperation> operationsSince(int revision) {
+        if (revision < baseRevision || revision > getRevision()) {
+            return null;
+        }
+        return new ArrayList<>(history.subList(revision - baseRevision, history.size()));
     }
 
     /**
@@ -43,15 +73,15 @@ public class ServerDocument {
      * @return the operation as it was actually applied (the one to broadcast)
      */
     public TextOperation receiveOperation(int revision, TextOperation operation) {
-        if (revision < 0 || revision > history.size()) {
+        if (revision < baseRevision || revision > getRevision()) {
             throw new IllegalArgumentException(
-                    "revision " + revision + " out of range [0, " + history.size() + "]");
+                    "revision " + revision + " out of range [" + baseRevision + ", " + getRevision() + "]");
         }
 
         // Transform the incoming operation against everything that happened after
         // the revision it was based on.
         TextOperation transformed = operation;
-        for (int i = revision; i < history.size(); i++) {
+        for (int i = revision - baseRevision; i < history.size(); i++) {
             TextOperation concurrent = history.get(i);
             TextOperation[] pair = TextOperation.transform(transformed, concurrent);
             transformed = pair[0];

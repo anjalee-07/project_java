@@ -68,6 +68,17 @@
     var currentLangId = "javascript";
     var peers = {};           // clientId -> { name, color, anchor, head, widget, node }
     var selectionTimer = null;
+    var listenersAttached = false;
+
+    // ---- reconnection state -------------------------------------------------
+    // A stable per-page key keeps our identity (and colored cursor) across
+    // reconnects; a fresh one per page load avoids two tabs colliding on op ids.
+    var clientKey = "u-" + Math.random().toString(36).slice(2) + "-" + Date.now().toString(36);
+    var opIdCounter = 0;          // monotonic id stamped on each outstanding op
+    var roomCtx = null;           // { room, name } so we can rebuild the socket
+    var intentionalClose = false; // set when the user leaves, to stop reconnecting
+    var reconnectAttempts = 0;
+    var reconnectTimer = null;
 
     // =========================================================================
     //  LOBBY
@@ -251,6 +262,8 @@
             });
         });
         document.getElementById("leave-btn").addEventListener("click", function () {
+            intentionalClose = true;
+            clearTimeout(reconnectTimer);
             if (ws) ws.close();
             location.href = "/";
         });
@@ -330,21 +343,52 @@
     //  WEBSOCKET + OT WIRING
     // =========================================================================
     function connect(room, name, lang) {
-        var proto = location.protocol === "https:" ? "wss" : "ws";
-        var url = proto + "://" + location.host + "/ws/collab/" + encodeURIComponent(room) +
-            "?name=" + encodeURIComponent(name) + "&lang=" + encodeURIComponent(lang || "javascript");
-        ws = new WebSocket(url);
-        setConn("connecting", "connecting…");
+        roomCtx = { room: room, name: name, lang: lang || "javascript" };
+        openSocket();
+    }
 
-        ws.onopen = function () { setConn("open", "live"); };
-        ws.onclose = function () { setConn("closed", "disconnected"); };
-        ws.onerror = function () { setConn("closed", "error"); };
+    function openSocket() {
+        if (!roomCtx) return;
+        var proto = location.protocol === "https:" ? "wss" : "ws";
+        // `since` lets the server replay only what we missed instead of resending
+        // the whole document; -1 (no client yet) means "send me a full init".
+        var since = client ? client.revision : -1;
+        var url = proto + "://" + location.host + "/ws/collab/" + encodeURIComponent(roomCtx.room) +
+            "?name=" + encodeURIComponent(roomCtx.name) +
+            "&lang=" + encodeURIComponent(roomCtx.lang) +
+            "&clientKey=" + encodeURIComponent(clientKey) +
+            "&since=" + since;
+        ws = new WebSocket(url);
+        setConn(reconnectAttempts > 0 ? "connecting" : "connecting",
+            reconnectAttempts > 0 ? "reconnecting…" : "connecting…");
+
+        ws.onopen = function () {
+            reconnectAttempts = 0;
+            setConn("open", "live");
+        };
+        ws.onclose = function () {
+            if (intentionalClose) { setConn("closed", "disconnected"); return; }
+            scheduleReconnect();
+        };
+        ws.onerror = function () { /* onclose handles retry */ };
         ws.onmessage = function (evt) { handleMessage(JSON.parse(evt.data)); };
+    }
+
+    // Exponential backoff (capped). We keep retrying until the user leaves; the
+    // OT client state is preserved so unsynced edits replay on reconnect.
+    function scheduleReconnect() {
+        setConn("closed", "reconnecting…");
+        markSync(false);
+        var delay = Math.min(8000, 500 * Math.pow(2, reconnectAttempts));
+        reconnectAttempts++;
+        clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(openSocket, delay);
     }
 
     function handleMessage(msg) {
         switch (msg.type) {
             case "init": onInit(msg); break;
+            case "replay": onReplay(msg); break;
             case "ack": onAck(); break;
             case "op": onRemoteOp(msg); break;
             case "selection": onRemoteSelection(msg); break;
@@ -359,7 +403,9 @@
         myClientId = msg.clientId;
         myColor = msg.color;
 
-        // Seed the document without generating an operation.
+        // Seed the document without generating an operation. (On a reconnect that
+        // falls back to a full init — e.g. after a server restart truncated the
+        // replay buffer — this resets to the authoritative document.)
         applyingRemote = true;
         editor.setValue(msg.document);
         applyingRemote = false;
@@ -368,11 +414,60 @@
         // Build the OT client bound to this editor + socket.
         client = makeClient(msg.revision);
         statusRev.textContent = "rev " + msg.revision;
+        markSync(true);
 
         applyLanguage(msg.language);
         msg.peers.forEach(addOrUpdatePeer);
         renderPresence();
-        attachEditorListeners();
+        if (!listenersAttached) {
+            attachEditorListeners();
+            listenersAttached = true;
+        }
+    }
+
+    // Reconnect: the server replays only the operations we missed. We keep our OT
+    // client (and any unsynced local edits) and feed the missed ops through it.
+    function onReplay(msg) {
+        myClientId = msg.clientId;
+        if (msg.color) myColor = msg.color;
+        applyLanguage(msg.language);
+
+        (msg.ops || []).forEach(function (entry) {
+            var op = TextOperation.fromJSON(entry.operation);
+            if (entry.clientId === myClientId) {
+                // Confirmation of one of our own ops that the server had applied.
+                if (client && !client.isSynchronized()) {
+                    client.serverAck();
+                }
+            } else {
+                client.applyServer(op);
+                nudgePeerCaret(entry.clientId, op);
+            }
+        });
+
+        statusRev.textContent = "rev " + client.revision;
+        (msg.peers || []).forEach(addOrUpdatePeer);
+        renderPresence();
+
+        // If we still have an unconfirmed op the server never received, resend it.
+        resendPending();
+        if (client.isSynchronized()) markSync(true);
+    }
+
+    // Resend the currently outstanding op (same op id) so a network drop never
+    // loses an in-flight edit. The server ignores it as a duplicate if it already
+    // applied it, so edits are never doubled.
+    function resendPending() {
+        if (!client || client.isSynchronized() || !ws || ws.readyState !== WebSocket.OPEN) return;
+        var outstanding = client.state && client.state.outstanding;
+        if (!outstanding) return;
+        sendJSON({
+            type: "op",
+            revision: client.revision,
+            opId: client.outstandingOpId,
+            operation: outstanding.toJSON()
+        });
+        markSync(false);
     }
 
     function onLanguage(msg) {
@@ -400,8 +495,12 @@
 
     function makeClient(revision) {
         var c = new BaseClient(revision);
+        c.outstandingOpId = -1;
         c.sendOperation = function (rev, operation) {
-            sendJSON({ type: "op", revision: rev, operation: operation.toJSON() });
+            // Stamp a fresh id on each newly-outstanding op so resends after a
+            // reconnect can be de-duplicated by the server.
+            c.outstandingOpId = ++opIdCounter;
+            sendJSON({ type: "op", revision: rev, opId: c.outstandingOpId, operation: operation.toJSON() });
             markSync(false);
         };
         c.applyOperation = function (operation) {
@@ -482,6 +581,9 @@
 
     // ---- server messages ----------------------------------------------------
     function onAck() {
+        // Ignore a stray ack while synchronized — happens when a reconnect resend
+        // races a server op that had already been applied (de-duplicated).
+        if (!client || client.isSynchronized()) return;
         client.serverAck();
         statusRev.textContent = "rev " + client.revision;
         if (client.isSynchronized()) markSync(true);
@@ -489,16 +591,20 @@
 
     function onRemoteOp(msg) {
         var op = TextOperation.fromJSON(msg.operation);
-        var caret = caretAfter(op);
         client.applyServer(op);
         statusRev.textContent = "rev " + client.revision;
         if (client.isSynchronized()) markSync(true);
+        nudgePeerCaret(msg.clientId, op);
+    }
 
-        var peer = peers[msg.clientId];
+    // Move a peer's cursor to where their edit left off.
+    function nudgePeerCaret(clientId, op) {
+        var caret = caretAfter(op);
+        var peer = peers[clientId];
         if (peer && caret >= 0) {
             peer.anchor = caret;
             peer.head = caret;
-            drawPeerCursor(msg.clientId);
+            drawPeerCursor(clientId);
         }
     }
 

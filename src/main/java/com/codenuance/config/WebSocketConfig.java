@@ -1,5 +1,6 @@
 package com.codenuance.config;
 
+import com.codenuance.messaging.MessageBus;
 import com.codenuance.session.RoomManager;
 import com.codenuance.ws.CollabWebSocketHandler;
 import org.springframework.context.annotation.Bean;
@@ -17,14 +18,16 @@ import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry
 public class WebSocketConfig implements WebSocketConfigurer {
 
     private final RoomManager roomManager;
+    private final MessageBus messageBus;
 
-    public WebSocketConfig(RoomManager roomManager) {
+    public WebSocketConfig(RoomManager roomManager, MessageBus messageBus) {
         this.roomManager = roomManager;
+        this.messageBus = messageBus;
     }
 
     @Bean
     public CollabWebSocketHandler collabWebSocketHandler() {
-        return new CollabWebSocketHandler(roomManager);
+        return new CollabWebSocketHandler(roomManager, messageBus);
     }
 
     @Override
