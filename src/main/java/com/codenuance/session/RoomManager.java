@@ -1,9 +1,11 @@
 package com.codenuance.session;
 
+import com.codenuance.persistence.SnapshotStore;
 import org.springframework.stereotype.Component;
 
 import java.util.Collection;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -25,6 +27,11 @@ public class RoomManager {
 
     private final Map<String, Room> rooms = new ConcurrentHashMap<>();
     private final AtomicInteger colorCursor = new AtomicInteger();
+    private final SnapshotStore snapshots;
+
+    public RoomManager(SnapshotStore snapshots) {
+        this.snapshots = snapshots;
+    }
 
     /** Presence accent colours derived from the project palette. */
     private static final String[] PEER_COLORS = {
@@ -43,8 +50,16 @@ public class RoomManager {
      */
     public Room getOrCreate(String roomId, String requestedLanguage) {
         String language = Languages.normalize(requestedLanguage);
-        return rooms.computeIfAbsent(roomId, id ->
-                new Room(id, prettyName(id), language, Languages.starterFor(language)));
+        return rooms.computeIfAbsent(roomId, id -> {
+            // Recover a persisted snapshot if one exists (crash/restart recovery);
+            // otherwise create a fresh room seeded with the language starter.
+            Optional<Room.Snapshot> saved = snapshots.load(id);
+            if (saved.isPresent()) {
+                Room.Snapshot s = saved.get();
+                return new Room(id, s.name(), Languages.normalize(s.language()), s.contents(), s.revision());
+            }
+            return new Room(id, prettyName(id), language, Languages.starterFor(language));
+        });
     }
 
     public Room get(String roomId) {
@@ -61,9 +76,18 @@ public class RoomManager {
         return PEER_COLORS[i];
     }
 
-    /** Drops a room once the last collaborator leaves, freeing its memory. */
+    /**
+     * Drops a room once the last collaborator leaves, freeing its memory. Persists
+     * a final snapshot first so the document can be recovered when someone rejoins.
+     */
     public void removeIfEmpty(String roomId) {
-        rooms.computeIfPresent(roomId, (id, room) -> room.getPeerCount() == 0 ? null : room);
+        rooms.computeIfPresent(roomId, (id, room) -> {
+            if (room.getPeerCount() == 0) {
+                snapshots.save(room.snapshot());
+                return null;
+            }
+            return room;
+        });
     }
 
     private static String prettyName(String id) {
